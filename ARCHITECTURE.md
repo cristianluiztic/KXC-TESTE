@@ -126,7 +126,7 @@ GitHub Actions Triggered
 
 ### 3. Camada de Dados
 - **RDS PostgreSQL**: Banco de dados gerenciado
-- **Multi-AZ**: Alta disponibilidade automática
+- **Multi-AZ**: Alta disponibilidade automática..
 - **Secrets Manager**: Gerenciamento seguro de credenciais
 
 ### 4. Segurança
