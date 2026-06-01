@@ -1,0 +1,53 @@
+name: Security Scan
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: '0 0 * * 0'  # Varredura semanal
+
+# Permissão mínima global; job eleva somente o necessário
+permissions:
+  contents: read
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents:        read
+      security-events: write # upload SARIF para aba Security
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Trivy scan (filesystem)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type:      'fs'
+          scan-ref:       '.'
+          format:         'sarif'
+          output:         'trivy-results.sarif'
+          severity:       'HIGH,CRITICAL'
+          ignore-unfixed: true
+
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      # Snyk como camada adicional — falhas são informativas, não bloqueantes
+      # Para tornar bloqueante: remova continue-on-error e ajuste --severity-threshold
+      - name: Run Snyk security scan
+        uses: snyk/actions/node@v1.0.0
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+        continue-on-error: true

@@ -16,24 +16,25 @@ env:
   ECS_CLUSTER:         simple-api-cluster
   ECS_TASK_DEFINITION: simple-api
 
+# Permissão mínima global; jobs elevam somente o necessário
 permissions:
-  id-token: write   # necessário para OIDC
   contents: read
-  security-events: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write        # OIDC — sem chaves IAM estáticas
+      contents: read
+      security-events: write # upload SARIF para aba Security
     outputs:
-      image: ${{ steps.image.outputs.image }}
+      image: ${{ steps.build.outputs.image }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # FIX: OIDC — sem chaves estáticas de IAM User
-      # Pré-requisito: criar IAM Role com trust policy para GitHub OIDC provider
-      # Documentação: https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -44,36 +45,36 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build, tag, and push image to Amazon ECR
-        id: image
+      # Constrói a imagem localmente — sem push ainda
+      - name: Build image locally
+        id: build
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG:    ${{ github.sha }}
         run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          # FIX: NÃO sobrescrever a tag 'latest' — ECR IMMUTABLE + rastreabilidade por SHA
-          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
-      # FIX: Trivy com CRITICAL bloqueante — falha o pipeline se houver vulnerabilidades críticas
-      - name: Run Trivy vulnerability scanner (bloqueante para CRITICAL)
-        uses: aquasecurity/trivy-action@master
+      # Scan ANTES do push — imagem vulnerável nunca chega ao ECR
+      - name: Trivy scan (CRITICAL bloqueante — impede push)
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref:    ${{ steps.image.outputs.image }}
-          format:       'table'
-          exit-code:    '1'
-          severity:     'CRITICAL'
+          image-ref:      ${{ steps.build.outputs.image }}
+          format:         'table'
+          exit-code:      '1'
+          severity:       'CRITICAL'
           ignore-unfixed: true
 
-      # Upload SARIF para aba Security do GitHub (não bloqueante, inclui HIGH também)
-      - name: Run Trivy (SARIF para GitHub Security)
-        uses: aquasecurity/trivy-action@master
+      - name: Trivy scan (SARIF para GitHub Security)
+        uses: aquasecurity/trivy-action@v0.36.0
         if: always()
         with:
-          image-ref: ${{ steps.image.outputs.image }}
-          format:    'sarif'
-          output:    'trivy-results.sarif'
-          severity:  'HIGH,CRITICAL'
+          image-ref:      ${{ steps.build.outputs.image }}
+          format:         'sarif'
+          output:         'trivy-results.sarif'
+          severity:       'HIGH,CRITICAL'
+          ignore-unfixed: true
         continue-on-error: true
 
       - name: Upload Trivy results to GitHub Security tab
@@ -82,8 +83,18 @@ jobs:
         with:
           sarif_file: 'trivy-results.sarif'
 
+      # Push somente após scan passar
+      - name: Push image to Amazon ECR
+        run: |
+          set -euo pipefail
+          docker push "${{ steps.build.outputs.image }}"
+
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -95,7 +106,7 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci  # FIX: usar ci em vez de install (reproduzível, respeita lockfile)
+        run: npm ci
 
       - name: Run linter
         run: npm run lint --if-present
@@ -106,8 +117,12 @@ jobs:
   deploy:
     needs: [build, test]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    environment: production  # FIX: requer aprovação manual configurada no repositório
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - name: Checkout code
@@ -121,8 +136,9 @@ jobs:
 
       - name: Download task definition
         run: |
+          set -euo pipefail
           aws ecs describe-task-definition \
-            --task-definition $ECS_TASK_DEFINITION \
+            --task-definition "$ECS_TASK_DEFINITION" \
             --query taskDefinition \
             > task-definition.json
 
@@ -137,9 +153,9 @@ jobs:
       - name: Deploy to Amazon ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
         with:
-          task-definition:          ${{ steps.task-def.outputs.task-definition }}
-          service:                  ${{ env.ECS_SERVICE }}
-          cluster:                  ${{ env.ECS_CLUSTER }}
+          task-definition:            ${{ steps.task-def.outputs.task-definition }}
+          service:                    ${{ env.ECS_SERVICE }}
+          cluster:                    ${{ env.ECS_CLUSTER }}
           wait-for-service-stability: true
 
       - name: Notify deployment
