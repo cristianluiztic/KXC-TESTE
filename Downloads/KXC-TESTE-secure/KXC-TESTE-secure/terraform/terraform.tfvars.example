@@ -1,0 +1,40 @@
+# Exemplo de terraform.tfvars
+# Copie este arquivo para terraform.tfvars e atualize os valores
+
+aws_region = "us-east-1"
+project_name = "simple-api"
+
+# VPC
+vpc_cidr = "10.0.0.0/16"
+public_subnet_1_cidr = "10.0.1.0/24"
+public_subnet_2_cidr = "10.0.2.0/24"
+private_subnet_1_cidr = "10.0.11.0/24"
+private_subnet_2_cidr = "10.0.12.0/24"
+
+# ECR Container
+# SUBSTITUA COM SEU AWS ACCOUNT ID
+container_image_uri = "468142523818.dkr.ecr.us-east-1.amazonaws.com/simple-api"
+container_image_tag = "latest"
+
+# ECS
+container_cpu = "256"
+container_memory = "512"
+desired_count = 2
+
+# RDS
+db_engine_version = "15.3"
+db_instance_class = "db.t3.micro"
+db_allocated_storage = 20
+db_name = "simpleapi"
+db_username = "postgres"
+db_multi_az = true
+db_backup_retention = 7
+
+# Auto Scaling
+autoscaling_min_capacity = 2
+autoscaling_max_capacity = 6
+autoscaling_target_cpu = 70
+autoscaling_target_memory = 80
+
+# CloudFront
+enable_cloudfront = true
