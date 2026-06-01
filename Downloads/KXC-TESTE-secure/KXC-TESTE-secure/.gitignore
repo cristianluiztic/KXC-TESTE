@@ -1,3 +1,6 @@
+# CI/CD
+.github/workflows/
+
 # Terraform
 **/.terraform/*
 *.tfstate
