@@ -1,0 +1,167 @@
+name: Deploy to ECS
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+
+env:
+  AWS_REGION:          us-east-1
+  ECR_REPOSITORY:      simple-api
+  ECS_SERVICE:         simple-api-service
+  ECS_CLUSTER:         simple-api-cluster
+  ECS_TASK_DEFINITION: simple-api
+
+# Permissão mínima global; jobs elevam somente o necessário
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write        # OIDC — sem chaves IAM estáticas
+      contents: read
+      security-events: write # upload SARIF para aba Security
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BUILD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Constrói a imagem localmente — sem push ainda
+      - name: Build image locally
+        id: build
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG:    ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+      # Scan ANTES do push — imagem vulnerável nunca chega ao ECR
+      - name: Trivy scan (CRITICAL bloqueante — impede push)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref:      ${{ steps.build.outputs.image }}
+          format:         'table'
+          exit-code:      '1'
+          severity:       'CRITICAL'
+          ignore-unfixed: true
+
+      - name: Trivy scan (SARIF para GitHub Security)
+        uses: aquasecurity/trivy-action@v0.36.0
+        if: always()
+        with:
+          image-ref:      ${{ steps.build.outputs.image }}
+          format:         'sarif'
+          output:         'trivy-results.sarif'
+          severity:       'HIGH,CRITICAL'
+          ignore-unfixed: true
+        continue-on-error: true
+
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      # Push somente após scan passar
+      - name: Push image to Amazon ECR
+        run: |
+          set -euo pipefail
+          docker push "${{ steps.build.outputs.image }}"
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint --if-present
+
+      - name: Run tests
+        run: npm test --if-present
+
+  deploy:
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region:     ${{ env.AWS_REGION }}
+
+      - name: Download task definition
+        run: |
+          set -euo pipefail
+          aws ecs describe-task-definition \
+            --task-definition "$ECS_TASK_DEFINITION" \
+            --query taskDefinition \
+            > task-definition.json
+
+      - name: Update image ID in task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name:  ${{ env.ECR_REPOSITORY }}
+          image:           ${{ needs.build.outputs.image }}
+
+      - name: Deploy to Amazon ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition:            ${{ steps.task-def.outputs.task-definition }}
+          service:                    ${{ env.ECS_SERVICE }}
+          cluster:                    ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: Notify deployment
+        if: always()
+        run: |
+          echo "Deployment completed!"
+          echo "Service: $ECS_SERVICE"
+          echo "Cluster: $ECS_CLUSTER"
+          echo "Image:   ${{ needs.build.outputs.image }}"
