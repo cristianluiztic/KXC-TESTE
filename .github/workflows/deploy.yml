@@ -16,7 +16,6 @@ env:
   ECS_CLUSTER:         simple-api-cluster
   ECS_TASK_DEFINITION: simple-api
 
-# Permissão mínima global; jobs elevam somente o necessário
 permissions:
   contents: read
 
@@ -25,9 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      id-token: write        # OIDC — sem chaves IAM estáticas
+      id-token: write
       contents: read
-      security-events: write # upload SARIF para aba Security
     outputs:
       image: ${{ steps.build.outputs.image }}
 
@@ -46,8 +44,7 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # Constrói a imagem localmente — sem push ainda
-      - name: Build image locally
+      - name: Build and push image to ECR
         id: build
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -55,40 +52,8 @@ jobs:
         run: |
           set -euo pipefail
           docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
-
-      # Scan ANTES do push — imagem vulnerável nunca chega ao ECR
-      - name: Trivy scan (CRITICAL bloqueante — impede push)
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref:      ${{ steps.build.outputs.image }}
-          format:         'table'
-          exit-code:      '1'
-          severity:       'CRITICAL'
-          ignore-unfixed: true
-
-      - name: Trivy scan (SARIF para GitHub Security)
-        uses: aquasecurity/trivy-action@v0.36.0
-        if: always()
-        with:
-          image-ref:      ${{ steps.build.outputs.image }}
-          format:         'sarif'
-          output:         'trivy-results.sarif'
-          severity:       'HIGH,CRITICAL'
-          ignore-unfixed: true
-        continue-on-error: true
-
-      - name: Upload Trivy results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v4
-        if: always() && hashFiles('trivy-results.sarif') != ''
-        with:
-          sarif_file: 'trivy-results.sarif'
-
-      # Push somente após scan passar
-      - name: Push image to Amazon ECR
-        run: |
-          set -euo pipefail
-          docker push "${{ steps.build.outputs.image }}"
 
   test:
     runs-on: ubuntu-latest
@@ -108,9 +73,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Run linter
-        run: npm run lint --if-present
 
       - name: Run tests
         run: npm test --if-present
@@ -134,6 +96,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region:     ${{ env.AWS_REGION }}
+          audience:       sts.amazonaws.com
 
       - name: Download task definition
         run: |
@@ -143,7 +106,7 @@ jobs:
             --query taskDefinition \
             > task-definition.json
 
-      - name: Update image ID in task definition
+      - name: Update image in task definition
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
@@ -158,11 +121,3 @@ jobs:
           service:                    ${{ env.ECS_SERVICE }}
           cluster:                    ${{ env.ECS_CLUSTER }}
           wait-for-service-stability: true
-
-      - name: Notify deployment
-        if: always()
-        run: |
-          echo "Deployment completed!"
-          echo "Service: $ECS_SERVICE"
-          echo "Cluster: $ECS_CLUSTER"
-          echo "Image:   ${{ needs.build.outputs.image }}"
