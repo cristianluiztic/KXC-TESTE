@@ -57,7 +57,7 @@
                     │  ┌────────────────────────────────┐  │
                     │  │   Database Layer               │  │
                     │  │  ┌──────────────────────────┐  │  │
-                    │  │  │  RDS PostgreSQL (Multi-AZ) │  │
+                    │  │  │  RDS PostgreSQL (-) │  │
                     │  │  │                          │  │  │
                     │  │  │ Primary (AZ-1)           │  │  │
                     │  │  │ • Instance: db.t3.micro  │  │  │
