@@ -13,7 +13,7 @@ RUN addgroup -S appgroup && \
     adduser -S appuser -G appgroup && \
     chown -R appuser:appgroup /app
 
-# FIX: executar como usuário não-privilegiado (não mais root)
+# FIX: executar como usuário não-privilegiado (não mais root-teste)
 USER appuser
 
 EXPOSE 3000
